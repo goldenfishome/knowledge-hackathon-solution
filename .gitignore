@@ -1,0 +1,14 @@
+results/
+__pycache__/
+*.pyc
+.DS_Store
+.Rhistory
+
+# secrets
+.env
+.env.*
+
+# data — do not publish (per organisers)
+snapshots_zip/
+snapshots/0*/
+Knowledge-Hackathon-Assignment.pdf
