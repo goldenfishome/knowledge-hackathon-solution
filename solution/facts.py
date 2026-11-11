@@ -1,13 +1,15 @@
 """Structured facts from markdown rate tables.
 
 One fact = one percentage cell:
-    product   the section heading above the table   ("Share Savings", "Regular Certificates")
+    segment   personal / business (from the url or the product name)
+    product   the row's own product cell if it has one ("Share Savings"), else the heading above
+    label     the row's describing cells as written, for display ("$10,000 – $24,999.99")
     quals     the row's non-rate cells, normalised  ("$10000-$24999.99",) or ("2024-27 model year", "60 month")
-    metric    rate / apy / apr (from the column header)
-    value     float, e.g. 0.15
+    metric    rate / apy / apr (from the column header; the cell's own unit wins)
+    value     float, e.g. 0.15  (value_hi set for ranges like "12.50% – 19.50%")
     effective the 'Rates are effective as of …' date written right under that table (ISO)
 
-The fact key (product, quals, metric) is what answers and conflicts are matched on, so two rows
+The fact key (segment, product, quals, metric) is what answers and conflicts are matched on, so two rows
 that differ in any qualifier (term, tier, model year, business vs personal) are different facts.
 """
 from __future__ import annotations
@@ -21,9 +23,13 @@ from store import to_iso
 PCT = re.compile(r"(\d{1,2}\.\d{1,3})\s*%")
 EFFECTIVE = re.compile(r"effective\s+(?:as\s+of\s+)?(\d{1,2}/\d{1,2}/\d{2,4})", re.I)
 SEP_ROW = re.compile(r"^\|\s*:?-{3,}")
-# columns that describe the row but are not part of its identity
-# first-column headers whose (digit-free) cells name the product itself: "| Share Savings | $25,000+ |…"
+# first-column headers whose cells may name the product itself: "| Share Savings | $25,000+ |…"
 PRODUCT_COLS = re.compile(r"^(account type|account|certificate|product|card type|ira type|loan type)$", re.I)
+# ...but only if the cell isn't a tier description ("6 Month", "Model Year 2026-23", "$25,000+")
+TIER_WORDS = re.compile(r"\$|%|\bmonths?\b|\bmo\b|\byears?\b|model", re.I)
+# a first cell like "Standard" under the heading "Rewards Visa" is a tier, not the product name
+GENERIC_CELLS = {"standard", "regular", "fixed", "variable", "traditional", "roth", "intro", "introductory"}
+# columns that describe the row but are not part of its identity
 IGNORED_COLS = re.compile(r"payment|example|points|min\.? to (open|earn)", re.I)
 
 
@@ -35,6 +41,8 @@ class Fact:
     quals: tuple[str, ...]   # sorted, normalised row qualifiers ("2024-27 model year", "60 month")
     metric: str
     value: float
+    value_hi: Optional[float]  # upper end for ranges, else None
+    label: str               # describing cells as written ("2024-27 Model Year · 60 Months")
     raw: str                 # the cell text as written, e.g. "3.40%1"
     row: str                 # the whole row (for quoting)
     effective: Optional[str]
@@ -99,7 +107,7 @@ def _heading(s: str) -> str:
 # ---------------------------------------------------------------- extraction
 
 def extract_tables(text: str):
-    """Yield (headings, header_cells, rows, effective_iso, extra_effective) for each markdown table."""
+    """Yield (headings, header_cells, rows, effective_iso) for each markdown table."""
     lines = text.split("\n")
     i, prev_end = 0, 0
     while i < len(lines):
@@ -156,25 +164,31 @@ def facts_from_page(text: str, pv) -> list[Fact]:
             if len(cells) != len(header):
                 continue
             product = heads[0] if heads else norm_text(header[0])
-            if PRODUCT_COLS.match(norm_text(header[0])) and cells[0] and not re.search(r"\d", cells[0]):
+            own_name = (PRODUCT_COLS.match(norm_text(header[0])) and cells[0]
+                        and not TIER_WORDS.search(cells[0])
+                        and not (heads and norm_text(cells[0]) in GENERIC_CELLS))
+            if own_name:
                 product = norm_text(re.sub(r"\d+$", "", cells[0]))
             segment = "business" if (pv.key.split("/", 1)[-1].startswith(("business", "business-"))
                                      or re.search(r"\bbusiness\b", product)) else "personal"
             product = re.sub(r"^business\s+|\s*\(business\)$", "", product).strip() or product
-            quals = []
-            for h, c, m in zip(header, cells, metrics):
-                if m or IGNORED_COLS.search(h) or PCT.search(c):
+            quals, label = [], []
+            for col, (h, c, m) in enumerate(zip(header, cells, metrics)):
+                if m or IGNORED_COLS.search(h) or PCT.search(c) or (col == 0 and own_name):
                     continue
                 q = norm_qual(c)
                 if q and q != product and not product.startswith(q):
                     quals.append(q)
+                    label.append(re.sub(r"(?<=[a-z%)])\d$", "", c.replace("\\", "").strip()))
             for h, c, m in zip(header, cells, metrics):
                 if not m:
                     continue
                 pm = PCT.findall(c)
-                if len(pm) != 1:          # ranges like "12.50% – 19.50%" are kept out of point facts
+                if not pm or len(pm) > 2:
                     continue
+                hi = float(pm[1]) if len(pm) == 2 else None   # "12.50% – 19.50%" -> 12.5 .. 19.5
                 m = metric_of(c) or m     # the cell's own unit wins: some tables mislabel columns
-                out.append(Fact(segment, product, section, tuple(sorted(set(quals))), m, float(pm[0]), c, row.strip(), eff,
+                out.append(Fact(segment, product, section, tuple(sorted(set(quals))), m, float(pm[0]), hi,
+                                " · ".join(label), c, row.strip(), eff,
                                 pv.url, pv.key, pv.snapshot_id, pv.taken_on, pv.kind, pv.tier))
     return out

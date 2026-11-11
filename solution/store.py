@@ -10,16 +10,28 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 # ---------------------------------------------------------------- URLs and tiers
 
+# query parameters that only track/where-from; the page behind them is the same page
+_TRACKING_PARAMS = {"hslang", "campaignid", "containertype", "pageurl", "portalid",
+                    "webinteractivecontentid", "webinteractiveid", "utm_source", "utm_medium",
+                    "utm_campaign", "utm_term", "utm_content", "redirect"}
+
+
 def canon_url(url: str) -> str:
-    """'https://www.dupaco.com/Rates/#x' -> 'dupaco.com/rates'. Same page = same key."""
+    """'https://www.dupaco.com/Rates/#x' -> 'dupaco.com/rates'. Same page = same key.
+
+    '#fragment' is dropped (it never reaches the server). Query parameters are kept unless they
+    are tracking tags: '?category=Budgeting' is a different listing, '?hsLang=en' is the same page.
+    """
     p = urlparse(url if "//" in url else "https://" + url)
     host = p.netloc.lower().removeprefix("www.")
     path = re.sub(r"/+$", "", p.path.lower()) or "/"
-    return host + path
+    keep = sorted(kv for kv in parse_qsl(p.query, keep_blank_values=True)
+                  if kv[0].lower() not in _TRACKING_PARAMS)
+    return host + path + ("?" + urlencode(keep) if keep else "")
 
 
 # (kind, tier) by path. tier: 2 = rate sheet, 1 = other official page, 0 = low (may be stale)
@@ -34,8 +46,8 @@ _KIND_RULES = [
 
 
 def page_kind(url: str) -> tuple[str, int]:
-    path = canon_url(url).split("/", 1)[1] if "/" in canon_url(url) else ""
-    path = "/" + path
+    p = urlparse(url if "//" in url else "https://" + url)
+    path = re.sub(r"/+$", "", p.path.lower()) or "/"
     for pat, kind, tier in _KIND_RULES:
         if re.search(pat, path):
             return kind, tier
@@ -116,8 +128,9 @@ class Store:
             kind, tier = page_kind(p.url)
             pv = PageVersion(p.url, key, p.title, p.fetched_at, snapshot.snapshot_id, snapshot.taken_on,
                              h, kind, tier, published_date(text) if kind == "article" else None)
-            old = view.pages.get(key)          # '/x' and '/x/#frag' in one pull: keep the newer fetch
-            if old is None or pv.fetched_at > old.fetched_at:
+            # '/x', '/x#frag', '/x?hsLang=en' in one pull: keep the newer fetch; on a tie, the plain url
+            old = view.pages.get(key)
+            if old is None or (pv.fetched_at, -len(pv.url)) > (old.fetched_at, -len(old.url)):
                 view.pages[key] = pv
         for key, pv in view.pages.items():
             hist = self.history.setdefault(key, [])

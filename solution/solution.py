@@ -1,8 +1,8 @@
 """Knowledge system entry point: build() -> KnowledgeSystem (see harness/contract.py).
 
 Status: ingest keeps full page history, cleans boilerplate, labels page authority and extracts
-rate-table facts. answer() is still a simple keyword fallback over the requested date's view;
-fact-based answering and conflicts() come next.
+rate-table facts. answer() uses those facts for rate questions (rates.py) and a simple keyword
+fallback for everything else; conflicts() comes next.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ sys.path.insert(0, str(next(d / "harness" for d in HERE.parents if (d / "harness
 from contract import Answer, Conflict, Snapshot, Source  # noqa: E402
 
 from facts import Fact, facts_from_page  # noqa: E402
+from rates import answer_rate  # noqa: E402
 from store import Store  # noqa: E402
 
 WORD = re.compile(r"[a-z0-9$%.]+")
@@ -26,6 +27,7 @@ class Knowledge:
     def __init__(self):
         self.store = Store()
         self.facts: dict[tuple, list[Fact]] = {}   # (canonical url, content hash) -> facts, parsed once
+        self._facts_cache: dict[str, list[Fact]] = {}   # snapshot id -> facts visible in that view
 
     # ------------------------------------------------------------ ingest
     def ingest(self, snapshot: Snapshot) -> None:
@@ -45,9 +47,20 @@ class Knowledge:
                            replace(f, snapshot_id=pv.snapshot_id, taken_on=pv.taken_on))
         return out
 
-    # ------------------------------------------------------------ answer (placeholder)
+    # ------------------------------------------------------------ answer
     def answer(self, question, as_of=None):
         view = self.store.view(as_of)
+
+        # 1) rate questions: answer from table facts (or refuse when no table row fits)
+        if view.snapshot_id not in self._facts_cache:
+            self._facts_cache[view.snapshot_id] = self.view_facts(as_of)
+        ra = answer_rate(question, self._facts_cache[view.snapshot_id])
+        if ra is not None:
+            return Answer(text=ra.text, confident=ra.confident, conflict_note=ra.note,
+                          sources=[Source(url=f.url, snapshot_id=view.snapshot_id, quote=f.row[:200])
+                                   for f in ra.sources])
+
+        # 2) everything else (for now): best-matching paragraph, trusted pages first
         q = set(WORD.findall(question.lower()))
         best, best_score = None, 0
         for pv in sorted(view.pages.values(), key=lambda p: (-p.tier, p.key)):
