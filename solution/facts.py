@@ -127,6 +127,15 @@ def extract_tables(text: str):
                         heads.append(h)
                     if len(heads) == 2:
                         break
+            # "Regular" / "Special" alone don't name a product: look further up (older page layouts put
+            # the product only in a tab link like "- [Term-Share Certificate Rates](…)")
+            if heads and heads[0] in GENERIC_CELLS | {"special"}:
+                for k in range(start - 1, max(0, start - 150) - 1, -1):
+                    tab = re.match(r"^\s*[-*]?\s*\[([^\]]+?)\s+rates\]\(", lines[k], re.I)
+                    cand = _heading(tab.group(1)) if tab else (_heading(lines[k]) if _is_heading(lines[k]) else "")
+                    if cand and cand not in GENERIC_CELLS | {"special"} and cand != heads[0]:
+                        heads[0] = f"{heads[0]} {cand}"
+                        break
             # effective date: first statement after the table, before the next table.
             # Plain lines beat footnote lines ("1Rates are effective …").
             plain, foot = None, None

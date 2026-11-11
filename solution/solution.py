@@ -1,8 +1,8 @@
 """Knowledge system entry point: build() -> KnowledgeSystem (see harness/contract.py).
 
 Status: ingest keeps full page history, cleans boilerplate, labels page authority and extracts
-rate-table facts. answer() uses those facts for rate questions (rates.py) and a simple keyword
-fallback for everything else; conflicts() comes next.
+rate-table facts. answer() uses those facts for rate questions (rates.py) and BM25 passage
+search with answer-type checks for everything else (search.py); conflicts() comes next.
 """
 from __future__ import annotations
 
@@ -18,9 +18,10 @@ from contract import Answer, Conflict, Snapshot, Source  # noqa: E402
 
 from facts import Fact, facts_from_page  # noqa: E402
 from rates import answer_rate  # noqa: E402
+from search import Chunk, Index, answer_text, chunk_page, is_link_question  # noqa: E402
 from store import Store  # noqa: E402
 
-WORD = re.compile(r"[a-z0-9$%.]+")
+LISTING_PAGE = re.compile(r"/(tag|author|category)/")
 
 
 class Knowledge:
@@ -28,6 +29,8 @@ class Knowledge:
         self.store = Store()
         self.facts: dict[tuple, list[Fact]] = {}   # (canonical url, content hash) -> facts, parsed once
         self._facts_cache: dict[str, list[Fact]] = {}   # snapshot id -> facts visible in that view
+        self._chunk_cache: dict[tuple, list[Chunk]] = {}  # (canonical url, content hash) -> passages
+        self._index_cache: dict[str, Index] = {}          # snapshot id -> BM25 index
 
     # ------------------------------------------------------------ ingest
     def ingest(self, snapshot: Snapshot) -> None:
@@ -54,24 +57,30 @@ class Knowledge:
         # 1) rate questions: answer from table facts (or refuse when no table row fits)
         if view.snapshot_id not in self._facts_cache:
             self._facts_cache[view.snapshot_id] = self.view_facts(as_of)
-        ra = answer_rate(question, self._facts_cache[view.snapshot_id])
+        ra = None if is_link_question(question) else answer_rate(question, self._facts_cache[view.snapshot_id])
         if ra is not None:
             return Answer(text=ra.text, confident=ra.confident, conflict_note=ra.note,
                           sources=[Source(url=f.url, snapshot_id=view.snapshot_id, quote=f.row[:200])
                                    for f in ra.sources])
 
-        # 2) everything else (for now): best-matching paragraph, trusted pages first
-        q = set(WORD.findall(question.lower()))
-        best, best_score = None, 0
-        for pv in sorted(view.pages.values(), key=lambda p: (-p.tier, p.key)):
-            for para in self.store.text(pv).split("\n\n"):
-                s = len(q & set(WORD.findall(para.lower())))
-                if s > best_score:
-                    best, best_score = (pv, para.strip()), s
-        if not best:
-            return Answer(text="That isn't listed on our website; please contact us.", confident=False)
-        pv, para = best
-        return Answer(text=para[:600], sources=[Source(url=pv.url, snapshot_id=pv.snapshot_id)])
+        # 2) everything else: BM25 search with answer-type and name checks (search.py)
+        ta = answer_text(question, self.index(view))
+        sources = [Source(url=ta.pv.url, snapshot_id=view.snapshot_id)] if ta.pv else []
+        return Answer(text=ta.text, sources=sources, confident=ta.confident)
+
+    def index(self, view) -> Index:
+        """BM25 index over the passages of one snapshot view, built on first use and cached."""
+        if view.snapshot_id not in self._index_cache:
+            chunks = []
+            for pv in sorted(view.pages.values(), key=lambda p: p.key):
+                if LISTING_PAGE.search(pv.key):
+                    continue                        # tag/author listings: teasers of other pages
+                ck = (pv.key, pv.hash)
+                if ck not in self._chunk_cache:
+                    self._chunk_cache[ck] = chunk_page(self.store.text(pv), pv)
+                chunks += [c if c.pv is pv else Chunk(c.text, c.terms, pv) for c in self._chunk_cache[ck]]
+            self._index_cache[view.snapshot_id] = Index(chunks, view.taken_on)
+        return self._index_cache[view.snapshot_id]
 
     def conflicts(self):
         return []
