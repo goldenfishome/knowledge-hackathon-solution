@@ -16,6 +16,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(next(d / "harness" for d in HERE.parents if (d / "harness" / "contract.py").exists())))
 from contract import Answer, Conflict, Snapshot, Source  # noqa: E402
 
+from conflicts import count_conflicts, describe, find_conflicts  # noqa: E402
 from facts import Fact, facts_from_page  # noqa: E402
 from rates import answer_rate  # noqa: E402
 from search import Chunk, Index, answer_text, chunk_page, is_link_question  # noqa: E402
@@ -82,8 +83,18 @@ class Knowledge:
             self._index_cache[view.snapshot_id] = Index(chunks, view.taken_on)
         return self._index_cache[view.snapshot_id]
 
-    def conflicts(self):
-        return []
+    def conflicts(self) -> list[Conflict]:
+        """Every place two pages disagree on the same fact, with the value we believe and why."""
+        views = [(v.snapshot_id, self.view_facts(v.taken_on)) for v in self.store.snapshots]
+        found = [describe(c) for c in find_conflicts(views)]
+        found += count_conflicts(self.index(self.store.view()))
+        out = []
+        for d in found:
+            sources = [Source(url=x.url, snapshot_id=x.snapshot_id, quote=getattr(x, "row", "")[:200] or None)
+                       for x in d["cite"]]
+            out.append(Conflict(topic=d["topic"], values=d["values"], sources=sources,
+                                resolution=d["resolution"], reason=d["reason"]))
+        return sorted(out, key=lambda c: c.topic)
 
 
 def build():

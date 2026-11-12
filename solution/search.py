@@ -179,6 +179,12 @@ def is_link_question(q: str) -> bool:
     return bool(re.search(ANSWER_TYPES[-1][1], q.lower()))
 
 
+def count_pattern(noun: str) -> str:
+    """'22 branch office locations', '294 Dupaco employees' — not '20 outside of … branch' or a year."""
+    between = r"(?:(?!of\b|in\b|at\b|for\b|outside\b|every\b|the\b)[a-z-]+\s+){0,2}"
+    return rf"\b(?!(?:19|20)\d\d\b)(\d[\d,]*)\+?\s+{between}{re.escape(noun)}"
+
+
 def answer_text(question: str, index: Index) -> TextAnswer:
     q_terms = words(question)
     low = question.lower()
@@ -186,9 +192,8 @@ def answer_text(question: str, index: Index) -> TextAnswer:
     if kind and kind[0] == "count":
         after = re.search(r"\bhow many\s+(.*)", low)
         noun = next((w for w in words(after.group(1))), None) if after else None   # skips "dupaco", "the"
-        if noun:                     # "22 branch office locations", "294 Dupaco employees" — not "20 outside of … branch"
-            between = r"(?:(?!of\b|in\b|at\b|for\b|outside\b|every\b|the\b)[a-z-]+\s+){0,2}"
-            kind = ("count", rf"\b(?!(?:19|20)\d\d\b)(\d[\d,]*)\+?\s+{between}{re.escape(noun)}")
+        if noun:
+            kind = ("count", count_pattern(noun))
     names = question_names(question)
 
     scores = index.bm25(q_terms)
