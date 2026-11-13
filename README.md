@@ -1,3 +1,18 @@
+> **My submission is in [`solution/`](solution/). Start with [`solution/NOTES.md`](solution/NOTES.md)**
+> (how "current" is decided, design, measured results, limitations).
+>
+> - **Design:** numbers (rates, APYs, APRs) come only from parsed rate tables, chosen by a deterministic
+>   "current" rule (newest effective date, then page trust), so the system can't state a stale or invented
+>   number. An optional LLM layer (Claude or Gemini) picks answer sentences for open text questions; I
+>   measured it on the public eval (same accuracy, p95 latency 0.01 s → 5.5 s), so it ships **off by default**.
+> - **Results:** public eval **0.864** accuracy, consistency 1.0, p95 latency 0.02 s, 14 conflicts listed.
+> - **Setup:** the default system needs no API keys (standard library only); tested from a fresh clone on
+>   Python 3.11. The LLM layer turns on with `KNOWLEDGE_LLM=on` plus a key.
+> - Run it: `python harness/run_eval.py --submission solution --eval eval/public_eval.jsonl`
+> - Tests: `python -m unittest discover -s tests`
+>
+> The rest of this README is the original kit description.
+
 # Hackathon: Build a Knowledge System That Knows What's True *Now*
 
 ## The problem in one minute

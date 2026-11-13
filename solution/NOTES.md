@@ -1,8 +1,18 @@
 # Notes
 
+## Approach in one paragraph
+
+Every snapshot is kept, so any question can be answered "as of" a date. Numbers (rates, APYs, APRs) come
+only from parsed rate tables, chosen by a deterministic "current" rule: newest effective date, then page
+trust (rate sheet > product page > calculator / article / PDF), so the system can't state a stale or
+invented number. Other questions use BM25 retrieval with answer-type and name checks, and the system says
+"I don't know" when nothing qualifies. I built an optional LLM layer (Claude or Gemini) that picks answer
+sentences for open text questions and measured it on the public eval: same accuracy, p95 latency
+0.01 s → 5.5 s. So it ships off by default, and the default system needs no API keys.
+
 ## API keys and requirements
 
-**No API key is required.** The core system makes no network calls and uses only the Python standard
+The default system needs no API key: it makes no network calls and uses only the Python standard
 library. Tested on Python 3.11 and 3.13.
 
 ```bash
@@ -23,6 +33,10 @@ KNOWLEDGE_LLM=on python harness/run_eval.py --submission solution --eval eval/pu
 ```
 
 If the layer is really on, the report's p95 latency is several seconds; at ≈ 0.01 s it fell back to rules.
+
+Behaviour tests on a tiny made-up site (no snapshot data needed), standard library only:
+`python -m unittest discover -s tests` (current value vs stale calculator, `as_of`, tiers, refusals,
+conflicts, the rate-above-APY rule, hours comparison, and that rate questions never reach the LLM).
 
 ## How it works
 
