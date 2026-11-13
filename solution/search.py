@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Optional
 
+import llm
+
 STOP = set("""a an the of for on in at to and or is are was were be been do does did you your i me my we our
 us it its can could would will should shall may might tell give get show what whats what's which who whom
 whose how when where why this that these those with about from by as any there here have has had dupaco
@@ -42,6 +44,9 @@ ANSWER_TYPES = [
 ]
 # facts that change over time: the newest relevant source wins over the most relevant one
 RECENCY_FIRST = {"count", "hours"}
+# "Do all branches keep the same hours?" asks for a comparison, not one schedule
+COMPARE = re.compile(r"\b(?:all|every|each|same|vary|varies|differ|different)\b")
+LLM_PASSAGES = 10         # passages the optional LLM picker reads (llm.py)
 REFUSAL = "That isn't listed on our website; please contact us."
 
 
@@ -221,6 +226,10 @@ def answer_text(question: str, index: Index) -> TextAnswer:
 
     if kind and kind[0] == "count":
         return _count_answer(cands, q_terms, kind)
+    if kind and kind[0] == "hours" and COMPARE.search(low):
+        compared = _compare_hours(cands, q_terms, kind, names)
+        if compared:
+            return compared
     if kind and kind[0] in RECENCY_FIRST:
         best_rel = max(x[2] for x in cands)
         pool = [x for x in cands if x[2] >= 0.6 * best_rel]
@@ -228,6 +237,18 @@ def answer_text(question: str, index: Index) -> TextAnswer:
     else:
         pick = max(cands, key=lambda x: (x[0], x[1], x[3].pv.key))
     c = pick[3]
+    if not kind and llm.enabled():
+        # optional: Claude picks which of the top passages' sentences answer the question
+        # it reads the top BM25 passages that name every specific name, before the 35% cut-off,
+        # so an answer split over two short passages ("who can join" + "Iowa, Illinois…") reaches it
+        ranked = sorted(scores, key=lambda i: (-scores[i], i))
+        top = [index.chunks[i] for i in ranked
+               if all(n in (index.chunks[i].text + " " + (index.chunks[i].pv.title or "")).lower() for n in names)
+               ][:LLM_PASSAGES]
+        chosen = llm.pick(question, [t.text for t in top])
+        if chosen:
+            src = next((t for t in top if chosen[0] in " ".join(t.text.split("\n"))), c)
+            return TextAnswer(" ".join(chosen)[:700], src.pv, True)
     if re.match(r"\s*what (?:is|are)\b", low) and names and not kind:
         # "What is X?": the first passage on that page that mentions X is usually the definition
         same = [x for x in cands if x[3].pv is c.pv]
@@ -274,6 +295,25 @@ def _count_answer(cands, q_terms, kind) -> TextAnswer:
     n = max(repeated, key=lambda n: (newest(n)[0], len(repeated[n]), n))
     c = newest(n)[1][3]
     return TextAnswer(_best_lines(c.text, q_terms, kind), c.pv, True)
+
+
+def _compare_hours(cands, q_terms, kind, names) -> Optional[TextAnswer]:
+    """Different schedules stated on different pages -> 'not the same everywhere', with each one.
+    One schedule everywhere -> None (answer normally)."""
+    seen = {}
+    for cand in sorted(cands, key=lambda x: (-x[1], -x[2], x[3].pv.key)):   # newest first
+        block = _best_lines(cand[3].text, q_terms, kind, names)
+        lobby = [l for l in block.split("\n") if re.search(kind[1], l, re.I)]
+        if not lobby:
+            continue
+        key = tuple(re.sub(r"[\s.]", "", t.lower()) for t in re.findall(kind[1], "\n".join(lobby), re.I))
+        seen.setdefault(key, (block, cand[3].pv))
+    if len(seen) < 2:
+        return None
+    shown = list(seen.values())[:3]
+    text = ("Hours are not the same at every branch. Schedules on the site include:\n\n"
+            + "\n\n".join(b for b, _ in shown) + "\n\nAsk which branch for its exact hours.")
+    return TextAnswer(text, shown[0][1], True, tuple(pv for _, pv in shown[1:]))
 
 
 def _only_questions(text: str) -> bool:

@@ -13,8 +13,14 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(next(d / "harness" for d in HERE.parents if (d / "harness" / "contract.py").exists())))
-from contract import Answer, Conflict, Snapshot, Source  # noqa: E402
+try:                                    # the grader's harness already put contract.py on the path
+    from contract import Answer, Conflict, Snapshot, Source  # noqa: E402
+except ImportError:                     # run from inside the kit: find its harness/ folder
+    _harness = next((d / "harness" for d in HERE.parents if (d / "harness" / "contract.py").exists()), None)
+    if _harness is None:
+        raise ImportError("contract.py not found: run through harness/run_eval.py or from inside the kit")
+    sys.path.insert(0, str(_harness))
+    from contract import Answer, Conflict, Snapshot, Source  # noqa: E402
 
 from conflicts import count_conflicts, describe, find_conflicts  # noqa: E402
 from facts import Fact, facts_from_page  # noqa: E402
