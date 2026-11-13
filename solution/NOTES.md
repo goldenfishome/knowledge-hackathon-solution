@@ -10,7 +10,7 @@ syntax that parses on Python 3.9+.
 python harness/run_eval.py --submission solution --eval eval/public_eval.jsonl
 ```
 
-Public eval: **0.814** accuracy, consistency 1.0, speed 1.0 (p95 ≈ 0.01 s), ingest < 1 s.
+Public eval: **0.849** accuracy, consistency 1.0, speed 1.0 (p95 ≈ 0.01 s), ingest < 1 s.
 
 ## How it works
 
@@ -34,6 +34,9 @@ Public eval: **0.814** accuracy, consistency 1.0, speed 1.0 (p95 ≈ 0.01 s), in
 3. **Which tier.** Rows are matched on every qualifier in the question: term, model year, balance or loan
    amount, rate vs APY vs APR, personal vs business, and words like jumbo/special/refinance. A different
    tier is a different fact, never a conflict.
+   A generic word alone ("savings", "loan") gets the menu of products the **rate sheet** lists
+   now, each with its current range; other pages may keep retired product names with old rates.
+   "Does/Do any … pay X%?" is answered Yes/No first, then with the rows it was checked against.
 4. **Text answers.** BM25 relevance × page trust, with recency as a small tie-breaker. For facts that change
    over time (opening hours, counts such as the number of branches), the newest relevant source wins; a
    count must also be stated on at least 3 pages, which filters out one-off numbers.

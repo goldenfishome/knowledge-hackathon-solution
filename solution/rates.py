@@ -67,6 +67,7 @@ class Query:
     amounts: list[float]
     descriptors: set[str]
     pick: Optional[str]                # "max" | "min" | None
+    asked: Optional[float] = None      # "Do any tiers pay 0.35% APY?" -> 0.35
 
 
 def read_question(q: str) -> Query:
@@ -92,8 +93,9 @@ def read_question(q: str) -> Query:
     desc |= set(re.findall(r"\b\d+/\d+\b", low))                  # "7/1" ARM
     pick = "max" if re.search(r"\b(highest|best|top|most|maximum)\b", low) else \
            "min" if re.search(r"\b(lowest|cheapest|minimum)\b", low) else None
+    asked = re.search(r"(\d+(?:\.\d+)?)\s?%", low)
     return Query(q, words, "business" if "business" in desc else "personal", metric, months,
-                 years, model_year, amounts, desc, pick)
+                 years, model_year, amounts, desc, pick, float(asked.group(1)) if asked else None)
 
 
 # ---------------------------------------------------------------- row matching
@@ -183,6 +185,7 @@ def _value(f, deposit: bool) -> str:
 
 
 # "What credit cards do you offer?" names no segment and asks for the whole menu
+YES_NO = re.compile(r"^\s*(?:do|does|is|are|can|will)\b", re.I)
 LIST_QUESTION = re.compile(r"\b(?:do you|does dupaco) (?:offer|have)\b|\bwhat (?:kinds?|types?) of\b|\boptions\b", re.I)
 
 
@@ -224,7 +227,9 @@ def _answer(qy: Query, facts: list, only_segment: bool = False) -> RateAnswer:
     scores = {p: score(p) for p in {f.product for f in pool}}
     best = max(scores.values(), default=0.0)
     if best <= 0:
-        return refusal()
+        # only a generic word ("savings", "loan"): show the menu of products it covers
+        generic = qwords & GENERIC
+        return _menu(qy, pool, facts, generic) if generic else refusal()
     products = {p for p, s in scores.items() if s >= best - 1e-9}
     # a product named for a tier the question didn't ask for ("home loans - refinance") steps aside
     plain = {p for p in products if not ({d for d in EXTRA_DESCRIPTORS if d in p} - qy.descriptors)}
@@ -263,9 +268,9 @@ def _answer(qy: Query, facts: list, only_segment: bool = False) -> RateAnswer:
         label = f" ({key[1]})" if key[1] else ""
         deposit = "apy" in m or "apr" not in m
         lines.append(f"{_title(key[0], qy.segment)}{label}: " + ", ".join(_value(f, deposit) for f in shown))
-    text = "\n".join(lines)
-
     used = [f for key in order for f in rows[key].values()]
+    text = _yes_no(qy, used, lines)
+
     sources = _backing_pages(used, facts)
     stale = sorted({(f.key_url, _pct(f.value), f.effective or "no date") for k in ranked[1:] for f in tables[k]
                     if (f.product, f.label, f.metric) in {(u.product, u.label, u.metric) for u in used}
@@ -274,6 +279,55 @@ def _answer(qy: Query, facts: list, only_segment: bool = False) -> RateAnswer:
     if stale:
         note = "Ignored older/less authoritative values: " + "; ".join(f"{v} on {u} (effective {e})" for u, v, e in stale[:4])
     return RateAnswer(text, sources, note)
+
+
+def _pays(f, asked: float) -> bool:
+    hi = f.value if f.value_hi is None else f.value_hi
+    return f.value - 1e-9 <= asked <= hi + 1e-9
+
+
+def _yes_no(qy: Query, used: list, lines: list) -> str:
+    """'Does/Do any … pay 0.35% APY?' gets a Yes/No first, then the rows it was checked against."""
+    if qy.asked is None or not YES_NO.match(qy.text):
+        return "\n".join(lines)
+    checked = [f for f in used if not qy.metric or f.metric == qy.metric]
+    unit = {"apy": " APY", "apr": " APR"}.get(qy.metric, "")
+    hits = sorted({_title(f.product, f.segment) + (f" ({f.label})" if f.label else "") for f in checked
+                   if _pays(f, qy.asked)})
+    head = (f"Yes: {_pct(qy.asked)}{unit} is paid by " + "; ".join(hits) + "." if hits
+            else f"No: none of these pay {_pct(qy.asked)}{unit}.")
+    return "\n".join([head] + lines)
+
+
+def _menu(qy: Query, pool: list, facts: list, generic: set) -> RateAnswer:
+    """A generic word names a family of products: give each one's current range by tier."""
+    family = [f for f in pool if generic & set(tokens(f.product))]
+    # the rate sheet is the list of what's offered now; other pages may keep retired product
+    # names with old rates (a calculator's "auto loan rates"), so use its products when it has any
+    on_sheet = {f.product for f in family if f.kind == "rate_sheet"}
+    products = sorted(on_sheet or {f.product for f in family})
+    lines, used = [], []
+    for p in products:
+        fs = [f for f in pool if f.product == p and row_fits(f, qy)]
+        if not fs:
+            continue
+        tables = defaultdict(list)
+        for f in fs:
+            tables[(f.effective or "", f.tier, f.key_url)].append(f)
+        table = tables[max(tables)]                      # newest effective date, then most trusted
+        have = {f.metric for f in table}
+        metric = qy.metric if qy.metric in have else next(m for m in ("apy", "apr", "rate") if m in have)
+        rows = [f for f in table if f.metric == metric]
+        top = max(rows, key=lambda f: f.value_hi or f.value)
+        lo, hi = min(f.value for f in rows), top.value_hi or top.value
+        name = {"apy": "APY", "apr": "APR"}.get(metric) or ("dividend rate" if "apr" not in have else "interest rate")
+        span = _pct(hi) if lo == hi else f"{_pct(lo)}–{_pct(hi)}"
+        best = f" (highest tier: {top.label})" if lo != hi and top.label else ""
+        lines.append(f"{_title(p, qy.segment)}: {span} {name}{best}")
+        used += rows
+    if not lines:
+        return refusal()
+    return RateAnswer(_yes_no(qy, used, lines[:12]), _backing_pages(used, facts))
 
 
 def refusal() -> RateAnswer:
@@ -304,3 +358,38 @@ def _backing_pages(used: list, facts: list) -> list:
             pages.setdefault(f.key_url, f)
     ranked = sorted(pages.values(), key=lambda f: (-f.tier, f.key_url))
     return ranked[:3]
+
+
+def rate_link(question: str, facts: list) -> Optional[RateAnswer]:
+    """'What link shows the certificate rates?': the product's own page that carries its rate
+    table (the shallowest official page), plus the full rate sheet. None if no product matches."""
+    if not RATE_INTENT.search(question):
+        return None
+    ans = answer_rate(question, facts)
+    if ans is None or not ans.confident or not ans.sources:
+        return None
+    wanted = {(f.segment, f.product) for f in ans.sources}
+    pages = {}
+    for f in facts:
+        if (f.segment, f.product) in wanted:
+            pages.setdefault(f.key_url, f)
+    def fit(f):            # url words shared with the product name, then fewest other url words
+        slug = set(tokens(f.key_url.rsplit("/", 1)[-1].replace("-", " ")))
+        name = set(tokens(f.product))
+        return -len(slug & name), len(slug - name)
+    official = sorted((f for f in pages.values() if f.kind == "official"),
+                      key=lambda f: (fit(f), f.key_url.count("/"), f.key_url))
+    sheet = next((f for f in pages.values() if f.kind == "rate_sheet"), None)
+    if not official and not sheet:
+        return None
+    main = official[0] if official else sheet
+    seg, product = next(iter(sorted(wanted)))
+    name = re.sub(r"\s+rates?$", "", _title(product, seg), flags=re.I)
+    text = f"{name} rates are listed at {_bare(main.url)}"
+    if sheet and sheet is not main:
+        text += f" (all current rates: {_bare(sheet.url)})"
+    return RateAnswer(text + ".", [main] + ([sheet] if sheet and sheet is not main else []))
+
+
+def _bare(url: str) -> str:
+    return re.sub(r"[?#].*$", "", url).rstrip("/")

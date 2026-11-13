@@ -18,7 +18,7 @@ from contract import Answer, Conflict, Snapshot, Source  # noqa: E402
 
 from conflicts import count_conflicts, describe, find_conflicts  # noqa: E402
 from facts import Fact, facts_from_page  # noqa: E402
-from rates import answer_rate  # noqa: E402
+from rates import answer_rate, rate_link  # noqa: E402
 from search import Chunk, Index, answer_text, chunk_page, is_link_question  # noqa: E402
 from store import Store  # noqa: E402
 
@@ -58,7 +58,9 @@ class Knowledge:
         # 1) rate questions: answer from table facts (or refuse when no table row fits)
         if view.snapshot_id not in self._facts_cache:
             self._facts_cache[view.snapshot_id] = self.view_facts(as_of)
-        ra = None if is_link_question(question) else answer_rate(question, self._facts_cache[view.snapshot_id])
+        facts = self._facts_cache[view.snapshot_id]
+        # "what link shows the X rates?" wants a page, not the numbers
+        ra = rate_link(question, facts) if is_link_question(question) else answer_rate(question, facts)
         if ra is not None:
             return Answer(text=ra.text, confident=ra.confident, conflict_note=ra.note,
                           sources=[Source(url=f.url, snapshot_id=view.snapshot_id, quote=f.row[:200])
