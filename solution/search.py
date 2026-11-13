@@ -172,6 +172,7 @@ class TextAnswer:
     text: str
     pv: Optional[object]
     confident: bool
+    also: tuple = ()          # other pages that state the same value (routing number, phone, ...)
 
 
 def is_link_question(q: str) -> bool:
@@ -233,7 +234,26 @@ def answer_text(question: str, index: Index) -> TextAnswer:
         c = min(same, key=lambda x: x[4])[3]
         sents = re.split(r"(?<=[.!?])\s+(?=[A-Z])", " ".join(c.text.split("\n")))
         return TextAnswer(" ".join(sents[:3])[:600], c.pv, True)      # a definition = the opening sentences
-    return TextAnswer(_best_lines(c.text, q_terms, kind, names), c.pv, True)
+    text = _best_lines(c.text, q_terms, kind, names)
+    return TextAnswer(text, c.pv, True, _backing(text, kind, c.pv, scores, index))
+
+
+def _backing(text: str, kind, pv, scores, index) -> tuple:
+    """Pages that state the exact same value (a routing number, phone, address), most trusted and
+    most relevant first, so the answer cites the official page too, not only the one it read."""
+    if not kind or kind[0] not in ("routing", "phone", "address"):
+        return ()
+    m = re.search(kind[1], text, re.I)
+    if not m:
+        return ()
+    value = m.group(0)
+    best = {}
+    for i, sc in scores.items():
+        c = index.chunks[i]
+        if c.pv.key != pv.key and value in c.text and sc > best.get(c.pv.key, (None, -1))[1]:
+            best[c.pv.key] = (c.pv, sc)
+    ranked = sorted(best.values(), key=lambda x: (-x[0].tier, -x[1], x[0].key))
+    return tuple(p for p, _ in ranked[:2])
 
 
 def _count_answer(cands, q_terms, kind) -> TextAnswer:

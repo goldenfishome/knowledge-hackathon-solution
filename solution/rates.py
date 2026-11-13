@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 # ---------------------------------------------------------------- question reading
@@ -182,12 +182,29 @@ def _value(f, deposit: bool) -> str:
     return f"{v} {name}"
 
 
+# "What credit cards do you offer?" names no segment and asks for the whole menu
+LIST_QUESTION = re.compile(r"\b(?:do you|does dupaco) (?:offer|have)\b|\bwhat (?:kinds?|types?) of\b|\boptions\b", re.I)
+
+
 def answer_rate(question: str, facts: list) -> Optional[RateAnswer]:
     """None = not a rate question (let the text search try). Otherwise an answer or a refusal."""
     if not RATE_INTENT.search(question):
         return None
     qy = read_question(question)
-    pool = [f for f in facts if f.segment == qy.segment] or facts
+    ans = _answer(qy, facts)
+    if (qy.segment == "personal" and not re.search(r"\bpersonal\b", question, re.I)
+            and LIST_QUESTION.search(question) and ans.confident):
+        # an open "what do you offer" question: add the business versions of the same products
+        biz = _answer(replace(qy, segment="business", descriptors=qy.descriptors | {"business"}), facts,
+                      only_segment=True)
+        if biz.confident:
+            ans = RateAnswer(ans.text + "\n" + biz.text, ans.sources + biz.sources,
+                             "; ".join(n for n in (ans.note, biz.note) if n) or None)
+    return ans
+
+
+def _answer(qy: Query, facts: list, only_segment: bool = False) -> RateAnswer:
+    pool = [f for f in facts if f.segment == qy.segment] or ([] if only_segment else facts)
 
     # 2. product: shared words, rare words weigh more
     vocab = defaultdict(set)
@@ -195,6 +212,10 @@ def answer_rate(question: str, facts: list) -> Optional[RateAnswer]:
         for w in set(tokens(f.product)) - STOP:
             vocab[w].add(f.product)
     qwords = qy.words - STOP
+    # "personal" is usually the segment ("personal credit cards"), and only names a product
+    # ("personal loan") when nothing else in the question does
+    if "personal" in qwords and any((set(tokens(f.product)) - STOP - GENERIC) & (qwords - {"personal"}) for f in pool):
+        qwords = qwords - {"personal"}
     def score(product: str) -> float:
         hit = (set(tokens(product)) - STOP) & qwords
         if not hit - GENERIC:

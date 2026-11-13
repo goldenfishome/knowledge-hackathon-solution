@@ -66,7 +66,7 @@ class Knowledge:
 
         # 2) everything else: BM25 search with answer-type and name checks (search.py)
         ta = answer_text(question, self.index(view))
-        sources = [Source(url=ta.pv.url, snapshot_id=view.snapshot_id)] if ta.pv else []
+        sources = [Source(url=pv.url, snapshot_id=view.snapshot_id) for pv in ((ta.pv,) + ta.also if ta.pv else ())]
         return Answer(text=ta.text, sources=sources, confident=ta.confident)
 
     def index(self, view) -> Index:
